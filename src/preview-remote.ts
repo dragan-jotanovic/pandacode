@@ -6,7 +6,7 @@ const THIS = 'dev-this';
 let signedIn = false, hostEnabled = false, notifyEnabled = false, remoteFullAccess = false;
 let devices: RemoteDevice[] = [], cancelSignIn: (() => void) | undefined;
 const offline = new Set<string>(), revoked = new Set<string>();
-const status = (): RemoteStatus => ({ configured: true, signedIn, account: signedIn ? { login: 'octocat' } : undefined, device: { id: THIS, name: 'This Mac', fingerprint: '3fa91c07d2b64e58a1e07c94b25d3f66' }, hostEnabled, notifyEnabled, remoteFullAccess, connected: signedIn });
+const status = (): RemoteStatus => ({ configured: true, signIn: (window as any).__remoteSignIn === 'key' ? 'key' : 'github', signedIn, account: signedIn ? { login: (window as any).__remoteSignIn === 'key' ? 'Private relay' : 'octocat' } : undefined, device: { id: THIS, name: 'This Mac', fingerprint: '3fa91c07d2b64e58a1e07c94b25d3f66' }, hostEnabled, notifyEnabled, remoteFullAccess, connected: signedIn });
 const sampleDevices = (): RemoteDevice[] => allDevices().filter(device => !revoked.has(device.id));
 const allDevices = (): RemoteDevice[] => [
   { id: THIS, name: 'This Mac', platform: 'macOS', fingerprint: '3fa91c07d2b64e58a1e07c94b25d3f66', host: hostEnabled, online: true, lastSeen: Date.now(), current: true },
@@ -60,6 +60,10 @@ function handle(command: string, args: Record<string, any>, emit: (name: string,
       const timer = setTimeout(() => { cancelSignIn = undefined; signedIn = true; devices = sampleDevices(); emit('remote://status', status()); resolve(status()); }, (window as any).__signInDelay ?? 400);
       cancelSignIn = () => { clearTimeout(timer); reject(new Error('Sign-in cancelled')); };
     });
+    case 'remote_sign_in_key':
+      w.__remoteKeys = [...(w.__remoteKeys ?? []), String(args.key)];
+      if (args.key === 'wrong-key') throw new Error('Relay: wrong access key');
+      signedIn = true; devices = sampleDevices(); emit('remote://status', status()); return status();
     case 'remote_sign_in_cancel': cancelSignIn?.(); cancelSignIn = undefined; return {};
     case 'remote_sign_out': signedIn = false; hostEnabled = false; notifyEnabled = false; remoteFullAccess = false; devices = []; links.clear(); emit('remote://status', status()); return status();
     case 'remote_set_host_enabled':

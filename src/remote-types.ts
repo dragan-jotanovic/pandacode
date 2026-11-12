@@ -1,6 +1,6 @@
 /* Shapes of the PandaCode Connect commands and events (docs/remote-access.md). */
 export interface RemoteStatus {
-  configured: boolean; signedIn: boolean; account?: { login: string; avatarUrl?: string };
+  configured: boolean; /** How this build signs in: the GitHub device flow, or a private relay's access key. */ signIn?: 'github' | 'key'; signedIn: boolean; account?: { login: string; avatarUrl?: string };
   device: { id: string; name: string; fingerprint: string }; hostEnabled: boolean; notifyEnabled: boolean; remoteFullAccess: boolean; connected: boolean;
 }
 export interface RemoteDevice { id: string; name: string; platform: string; fingerprint: string; host: boolean; online: boolean; lastSeen: number | string | null; current: boolean }

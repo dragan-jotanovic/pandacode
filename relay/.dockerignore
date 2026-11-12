@@ -1,0 +1,7 @@
+node_modules
+.wrangler
+.dev.vars
+self-host/.env
+self-host/.dev.vars
+self-host/certs
+test

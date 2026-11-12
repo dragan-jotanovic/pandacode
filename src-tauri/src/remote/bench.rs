@@ -1180,7 +1180,7 @@ async fn live_two_computers() {
     let secrets = super::secrets::read(&dir);
     let (token, secret) = (secrets.token.expect("signed in"), crypto::decode_secret(&secrets.key.expect("a device key")).expect("a device key"));
     let me = super::config::load(&dir).device_id;
-    let build = super::config::Build { relay: relay.clone(), client_id: String::new() };
+    let build = super::config::Build { relay: relay.clone(), client_id: None };
     let devices = super::auth::relay(&build, &token, reqwest::Method::GET, "/v1/devices").await.unwrap();
     let list = devices["devices"].as_array().expect("devices");
     let public = list.iter().find(|d| d["id"] == target.as_str()).expect("the host is on this account")["publicKey"].as_str().unwrap().to_owned();

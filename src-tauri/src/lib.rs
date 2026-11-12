@@ -4532,6 +4532,7 @@ pub fn run() {
                 remote::remote_status,
                 remote::remote_sign_in_start,
                 remote::remote_sign_in_finish,
+                remote::remote_sign_in_key,
                 remote::remote_sign_in_cancel,
                 remote::remote_sign_out,
                 remote::remote_set_host_enabled,

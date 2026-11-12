@@ -49,7 +49,11 @@ pandacode serve --sign-in
 ```
 
 Prints a GitHub device-flow code, waits for you to approve it in a browser (anywhere), then
-serves. `--device-name "build-server"` names the server in your device list (default: the
+serves. For a private relay with no GitHub (build without `PANDACODE_GITHUB_CLIENT_ID`, relay
+with an `ACCESS_KEY`; see [remote access](remote-access.md#private-relay-no-github-own-certificate-authority)),
+it reads the access key from `PANDACODE_RELAY_KEY` or one line of stdin instead:
+`PANDACODE_RELAY_KEY=… pandacode serve --sign-in`. Set `PANDACODE_RELAY_CA` to the relay's
+certificate authority file when it uses a private one. `--device-name "build-server"` names the server in your device list (default: the
 hostname). The server becomes a host automatically. Other flags, each exiting after it
 saves: `--sign-out`, `--full-access` / `--no-full-access` (let remote devices pick Full
 access — no approval prompts; off by default).

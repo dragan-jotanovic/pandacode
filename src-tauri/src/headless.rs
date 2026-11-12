@@ -119,7 +119,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         }
         Command::Serve => {
             if !crate::remote::configured() {
-                eprintln!("Remote access is not configured in this build (PANDACODE_RELAY_URL / PANDACODE_GITHUB_CLIENT_ID).");
+                eprintln!("Remote access is not configured in this build (PANDACODE_RELAY_URL, and PANDACODE_GITHUB_CLIENT_ID unless the relay uses an access key).");
                 std::process::exit(1)
             }
             if !crate::remote::signed_in(dir) {
@@ -392,7 +392,8 @@ Runs this computer as an always-on PandaCode Connect host: your devices see it a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
 under `xvfb-run -a pandacode serve …` (a display is required to start, none is used).
 
-  --sign-in              First run: sign in with the GitHub device flow, enable hosting, then serve.
+  --sign-in              First run: sign in with the GitHub device flow (or, for a relay without GitHub,
+                         the access key from PANDACODE_RELAY_KEY or stdin), enable hosting, then serve.
   --sign-out             Forget the Connect sign-in on this server and exit.
   --full-access          Let remote devices pick Full access (no approvals); exits after saving.
   --no-full-access       Require approvals again (the default); exits after saving.

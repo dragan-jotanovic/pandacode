@@ -1,0 +1,49 @@
+# Self-hosted PandaCode Connect relay: the Worker (via wrangler dev) behind a Caddy TLS front.
+#   cp .env.example .env     # fill it in
+#   docker compose up -d --build
+# Run from this folder. Clients then use PANDACODE_RELAY_URL=https://$RELAY_HOST (and, for a private
+# CA, PANDACODE_RELAY_CA=<ca.pem>). With only ACCESS_KEY set, nothing here needs internet access.
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: self-host/Dockerfile
+    restart: unless-stopped
+    environment:
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      # Sign in with the shared access key (no GitHub), with GitHub, or both; the entrypoint checks.
+      ACCESS_KEY: ${ACCESS_KEY:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+    volumes:
+      - relay-data:/data
+    # Reachable only through Caddy: no published port.
+    expose:
+      - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/v1/devices').then(r=>process.exit(r.status===401?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST in .env}
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${CERT_DIR:?set CERT_DIR in .env}:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

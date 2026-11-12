@@ -51,6 +51,10 @@ while H is still starting it) and `remote_synced_id` (the last of H's message id
 
 ## Accounts
 
+A relay signs devices in one of two ways, or both. **GitHub** is below. A **private relay**
+(`relay/self-host`, [private relay](#private-relay-no-github-own-certificate-authority)) can leave
+GitHub out and sign in with a shared access key.
+
 Sign in with GitHub using the OAuth **device flow** (no client secret anywhere):
 
 1. Desktop: `POST https://github.com/login/device/code` with `client_id`, and the scope is empty (identity only).
@@ -101,8 +105,44 @@ missing (or expired) token means signed out. Nothing prompts and nothing touches
 unless signed in.
 
 Build config is `option_env!("PANDACODE_RELAY_URL")` and `option_env!("PANDACODE_GITHUB_CLIENT_ID")`.
-Environment variables of the same names override them at run time. If either is missing, remote
-access is shown as "not configured in this build".
+Environment variables of the same names override them at run time. Without a relay URL, remote
+access is shown as "not configured in this build". Without a client ID the build signs in with the
+relay's access key instead of GitHub (next section).
+
+### Private relay: no GitHub, own certificate authority
+
+For a relay on a private network (Docker setup in `relay/self-host`), two things replace GitHub and
+the public certificate. Neither changes the encryption between devices.
+
+**Access key.** The relay's `ACCESS_KEY` secret (at least 32 characters) enables
+`POST /v1/auth/key` `{ key, device }`. The relay compares it in constant time (both sides hashed
+first) and answers `{ token, account: { id: "key:private", login: "Private relay", avatarUrl: "" } }`;
+a wrong key is `401 wrong access key`. It shares the sign-in limits with the GitHub route (10 per
+minute per client address, 300 overall) and the 256 KiB body cap. Everyone who has the key is one
+account (`key:private`, never colliding with a `gh:` account), so the key is as sensitive as a
+password: tokens are issued from it and expire as usual (30 days, refreshed). Changing `ACCESS_KEY`
+only stops new sign-ins; signed-in devices keep their tokens until `SESSION_SECRET` changes. With
+only `ACCESS_KEY` set, the relay never contacts GitHub and `/v1/auth/github` answers `500 server
+error`; with only the GitHub pair set, `/v1/auth/key` does. A build without
+`PANDACODE_GITHUB_CLIENT_ID` shows a password field and **Sign in** in Settings → Remote access
+(status `signIn: "key"`; `remote_sign_in_key` `{ key }`), and `pandacode serve --sign-in` reads the key
+from `PANDACODE_RELAY_KEY` or one line of stdin. The key is trimmed, at most 512 characters, and is
+never saved: only the relay token is.
+
+**Own certificate authority.** The relay URL must still be `https://`. The app trusts the public
+roots plus the authority named by `PANDACODE_RELAY_CA` (a PEM file path), or by `relay-ca.pem` in the
+app data folder when the variable is unset (`config::relay_ca`). A configured file that is
+missing, over 64 KiB, or without a certificate is an error that names the file; it is never
+silently ignored. HTTP calls (`cloud::http::client_trusting`) and the relay WebSocket (`socket::tls`,
+rebuilt when the file changes, so a new certificate needs no restart) use the same extra roots,
+and nothing else is relaxed: names and expiry are still checked. Without the authority, a private
+relay fails with "The relay's certificate is not trusted…". Use a CA certificate plus a
+separate server certificate that has a SAN for the name or IP address in the URL
+(`relay/self-host/make-certs.sh` makes the pair; that setup is the one tested). A single
+self-signed server certificate used as its own root has not been tried. The mobile app is unchanged: it still needs a GitHub client ID and the phone's own
+trust store.
+
+Live check against a running private relay: `PANDACODE_RELAY_URL=https://… PANDACODE_RELAY_CA=… PANDACODE_RELAY_KEY=… cargo test --lib live_private_relay -- --ignored`.
 
 ## Relay HTTP API
 
@@ -1604,6 +1644,7 @@ GitHub CLI work while the inspected task state is unchanged.
 | `remote_status` | | `{ configured, signedIn, account?: { login, avatarUrl }, device: { id, name, fingerprint }, hostEnabled, connected }` |
 | `remote_sign_in_start` | | `{ userCode, verificationUri, expiresIn }` |
 | `remote_sign_in_finish` | | status (waits for the device flow, error on expiry, denial or cancel) |
+| `remote_sign_in_key` | `{ key }` | status. For a build without a GitHub client ID: signs in with the relay's access key (`signIn: "key"` in the status). |
 | `remote_sign_in_cancel` | | status. Stops the device-flow poll. |
 | `remote_sign_out` | | status |
 | `remote_set_host_enabled` | `{ enabled?, fullAccess? }` | status (with `remoteFullAccess`). Sets Allow remote control and/or Full access for remote tasks. |

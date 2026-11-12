@@ -1,0 +1,19 @@
+# TLS front for the relay. PandaCode only accepts https:// relays. It trusts the public CAs, plus
+# the one authority you give it (PANDACODE_RELAY_CA), so the certificate here may come from either:
+# a public CA, or the private one that make-certs.sh makes.
+# RELAY_HOST is the name or IP address in PANDACODE_RELAY_URL.
+{
+	# The certificate is supplied: no ACME, and nothing listens on port 80.
+	auto_https off
+	# A client that connects by IP address sends no server name; use this certificate for it.
+	default_sni {$RELAY_HOST}
+}
+
+https://{$RELAY_HOST} {
+	tls /certs/fullchain.pem /certs/privkey.pem
+
+	reverse_proxy relay:8787 {
+		# The relay rate-limits sign-ins per client address and reads it from this header.
+		header_up CF-Connecting-IP {remote_host}
+	}
+}

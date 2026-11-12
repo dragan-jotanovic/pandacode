@@ -229,6 +229,8 @@ impl Remote {
         let inner = self.lock();
         let mut status = json!({
             "configured": config::build().is_some(),
+            // How this build signs in: the GitHub device flow, or the relay's access key.
+            "signIn": if config::build().is_some_and(|build| !auth::uses_github(&build)) { "key" } else { "github" },
             "signedIn": inner.token.is_some(),
             "device": {"id": inner.settings.device_id, "name": config::device_name(), "fingerprint": fingerprint},
             "hostEnabled": inner.settings.host_enabled,
@@ -273,6 +275,7 @@ fn emit_presence(app: &tauri::AppHandle) {
 
 /// Loads settings and starts the socket when already signed in. No network otherwise.
 pub(crate) fn setup(app: &tauri::AppHandle, dir: &std::path::Path) {
+    config::use_data_dir(dir);
     let settings = config::load(dir);
     // Only a signed-in computer reads the secrets file; an expired token means signed out.
     let now = chrono::Utc::now().timestamp();
@@ -379,19 +382,37 @@ pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
         inner.cancel = Some(cancel);
         (flow, cancelled)
     };
-    let public_key = crypto::public_key(&state.ensure_secret()?);
     let github_token = tokio::select! {
         token = auth::github_token(&build, flow) => token?,
         _ = cancelled => return Err("Sign-in was cancelled.".into()),
     };
+    complete_sign_in(&app, &build, auth::Credential::Github(github_token)).await
+}
+
+/// Signs in to a relay that uses an access key instead of GitHub.
+#[tauri::command]
+pub async fn remote_sign_in_key(app: tauri::AppHandle, key: String) -> Result<Value> {
+    let build = config::build().ok_or("Remote access is not configured in this build.")?;
+    if auth::uses_github(&build) {
+        return Err("This relay signs in with GitHub, not an access key.".into());
+    }
+    let key = auth::clean_key(&key)?;
+    cancel_sign_in(&app);
+    complete_sign_in(&app, &build, auth::Credential::Key(key)).await
+}
+
+/// Registers this computer with the relay for `credential`, saves the sign-in and connects.
+async fn complete_sign_in(app: &tauri::AppHandle, build: &config::Build, credential: auth::Credential) -> Result<Value> {
+    let state = remote(app);
+    let public_key = crypto::public_key(&state.ensure_secret()?);
     let device = |id: String| json!({"id": id, "name": config::device_name(), "platform": std::env::consts::OS, "publicKey": public_key});
-    let (token, account) = match auth::register(&build, &github_token, device(state.device_id())).await {
+    let (token, account) = match auth::register(build, &credential, device(state.device_id())).await {
         // This id is registered with another key (the key file was lost, say): become a new device once.
         Err(error) if error == auth::KEY_CHANGED => {
             let device_id = uuid::Uuid::new_v4().to_string();
             state.lock().settings.device_id = device_id.clone();
             state.save();
-            auth::register(&build, &github_token, device(device_id)).await?
+            auth::register(build, &credential, device(device_id)).await?
         }
         other => other?,
     };
@@ -405,8 +426,8 @@ pub async fn remote_sign_in_finish(app: tauri::AppHandle) -> Result<Value> {
         inner.settings.account = Some(account);
     }
     state.save();
-    socket::start(&app);
-    emit_status(&app);
+    socket::start(app);
+    emit_status(app);
     Ok(state.status())
 }
 
@@ -527,38 +548,59 @@ fn is_target(inner: &Inner, device: &Device) -> bool {
 // Headless host support (`pandacode serve`, docs/headless.md): the sign-in, settings and
 // status paths a server needs, without a webview to click through.
 
-/// Full headless sign-in: the GitHub device flow on stdout, then [`headless_register`].
+/// The environment variable that carries the relay's access key to `pandacode serve --sign-in`.
+const KEY_ENV: &str = "PANDACODE_RELAY_KEY";
+
+/// The access key for a headless sign-in: the environment variable, else one line from stdin
+/// (so `pandacode serve --sign-in < keyfile` works, and a terminal can paste it).
+fn headless_key() -> Result<String> {
+    if let Some(key) = std::env::var(KEY_ENV).ok().filter(|key| !key.trim().is_empty()) {
+        return auth::clean_key(&key);
+    }
+    eprintln!("Enter the relay's access key (or set {KEY_ENV}):");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|_| "Could not read the access key.")?;
+    auth::clean_key(&line)
+}
+
+/// Full headless sign-in: the GitHub device flow on stdout (or the relay's access key, for a
+/// relay without GitHub), then [`headless_register`].
 pub(crate) async fn headless_sign_in(dir: &Path, name: Option<String>) -> Result<String> {
+    config::use_data_dir(dir);
     let build = config::build().ok_or(
-        "Remote access is not configured in this build (PANDACODE_RELAY_URL / PANDACODE_GITHUB_CLIENT_ID).",
+        "Remote access is not configured in this build (PANDACODE_RELAY_URL, and PANDACODE_GITHUB_CLIENT_ID unless the relay uses an access key).",
     )?;
-    let (flow, view) = auth::start(&build).await?;
-    println!(
-        "PandaCode Connect sign-in: open {} and enter the code {}.",
-        view["verificationUri"].as_str().unwrap_or_default(),
-        view["userCode"].as_str().unwrap_or_default()
-    );
-    let github_token = auth::github_token(&build, flow).await?;
-    let settings = headless_register(&build, &github_token, dir, name).await?;
+    let credential = if auth::uses_github(&build) {
+        let (flow, view) = auth::start(&build).await?;
+        println!(
+            "PandaCode Connect sign-in: open {} and enter the code {}.",
+            view["verificationUri"].as_str().unwrap_or_default(),
+            view["userCode"].as_str().unwrap_or_default()
+        );
+        auth::Credential::Github(auth::github_token(&build, flow).await?)
+    } else {
+        auth::Credential::Key(headless_key()?)
+    };
+    let settings = headless_register(&build, &credential, dir, name).await?;
     let login = settings.account.as_ref().map(|account| account.login.clone()).unwrap_or_default();
     println!("Signed in as {login} — this server is now hosting for your devices.");
     Ok(login)
 }
 
-/// Registers this device for `github_token` and enables hosting on disk. The last half of
+/// Registers this device for `credential` and enables hosting on disk. The last half of
 /// [`headless_sign_in`], separate so tests can run it against a mock relay.
-async fn headless_register(build: &config::Build, github_token: &str, dir: &Path, name: Option<String>) -> Result<config::Settings> {
+async fn headless_register(build: &config::Build, credential: &auth::Credential, dir: &Path, name: Option<String>) -> Result<config::Settings> {
     let mut settings = config::load(dir);
     let secret = config::load_or_create_key(secrets::read(dir).key, |text| secrets::set_key(dir, text))?;
     let public_key = crypto::public_key(&secret);
     let name = name.unwrap_or_else(config::device_name);
     let device = |id: String| json!({"id": id, "name": name, "platform": std::env::consts::OS, "publicKey": public_key});
-    let (token, account) = match auth::register(build, github_token, device(settings.device_id.clone())).await {
+    let (token, account) = match auth::register(build, credential, device(settings.device_id.clone())).await {
         // This id is registered with another key (the key file was lost, say): become a new device once.
         Err(error) if error == auth::KEY_CHANGED => {
             settings.device_id = uuid::Uuid::new_v4().to_string();
             config::save(dir, &settings)?;
-            auth::register(build, github_token, device(settings.device_id.clone())).await?
+            auth::register(build, credential, device(settings.device_id.clone())).await?
         }
         other => other?,
     };
@@ -669,11 +711,11 @@ mod tests {
                 (200, json!({"token": relay_token(&dev), "account": {"id": "gh:1", "login": "octocat", "avatarUrl": "u"}}).to_string())
             }
         });
-        let build = config::Build { relay, client_id: "Iv1.test".into() };
+        let build = config::Build { relay, client_id: Some("Iv1.test".into()) };
         let dir = std::env::temp_dir().join(format!("pandacode-headless-signin-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = config::load(&dir).device_id;
-        let settings = crate::cloud::http::block(async { headless_register(&build, "gh-token", &dir, Some("Build server".into())).await }).unwrap();
+        let settings = crate::cloud::http::block(async { headless_register(&build, &auth::Credential::Github("gh-token".into()), &dir, Some("Build server".into())).await }).unwrap();
         assert!(settings.host_enabled && !settings.remote_full_access);
         assert_eq!(settings.account.as_ref().unwrap().login, "octocat");
         assert_ne!(settings.device_id, first, "a 409 made this a new device");
@@ -681,6 +723,91 @@ mod tests {
         assert!(config::load(&dir).host_enabled);
         assert_eq!(seen.lock().unwrap().len(), 2, "the 409 retried once");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A relay with no GitHub: the access key goes to `/v1/auth/key`, never to the GitHub route.
+    #[test]
+    fn headless_register_with_an_access_key_uses_the_key_route() {
+        let (relay, seen) = crate::cloud::http::mock::serve(move |request, _| {
+            let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+            let dev = body["device"]["id"].as_str().unwrap_or_default().to_owned();
+            (200, json!({"token": relay_token(&dev), "account": {"id": "key:private", "login": "Private relay", "avatarUrl": ""}}).to_string())
+        });
+        let build = config::Build { relay, client_id: None };
+        assert!(!auth::uses_github(&build));
+        let dir = std::env::temp_dir().join(format!("pandacode-headless-key-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let credential = auth::Credential::Key("k".repeat(40));
+        let settings = crate::cloud::http::block(async { headless_register(&build, &credential, &dir, Some("Build server".into())).await }).unwrap();
+        assert!(settings.host_enabled);
+        assert_eq!(settings.account.as_ref().unwrap().login, "Private relay");
+        assert_eq!(settings.account.as_ref().unwrap().avatar_url, "");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].path, "/v1/auth/key");
+        let body: Value = serde_json::from_str(&seen[0].body).unwrap();
+        assert_eq!(body["key"], "k".repeat(40));
+        assert!(body.get("githubToken").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_typed_access_key_is_trimmed_and_bounded() {
+        assert_eq!(auth::clean_key("  abc123\n").unwrap(), "abc123");
+        assert!(auth::clean_key("   ").is_err());
+        assert!(auth::clean_key(&"k".repeat(513)).is_err());
+        assert!(auth::clean_key("ab\ncd").is_err(), "a pasted second line is not part of a key");
+        assert!(auth::clean_key(&"k".repeat(512)).is_ok());
+    }
+
+    #[test]
+    fn a_wrong_key_is_reported_by_the_relay_not_as_a_sign_out() {
+        let (relay, _) = crate::cloud::http::mock::serve(|_, _| (401, r#"{"error":"wrong access key"}"#.to_owned()));
+        let build = config::Build { relay, client_id: None };
+        let error = crate::cloud::http::block(async { auth::register(&build, &auth::Credential::Key("nope".into()), json!({})).await }).unwrap_err();
+        assert_eq!(error, "Relay: wrong access key");
+    }
+
+    /// Drives a real private relay (relay/self-host) with the app's own client code: HTTPS and the
+    /// WebSocket over the relay's own CA, key sign-in, a wrong key, and a build that lacks the CA.
+    ///   PANDACODE_RELAY_URL=https://127.0.0.1:8443 PANDACODE_RELAY_CA=relay/self-host/certs/ca.pem \
+    ///   PANDACODE_RELAY_KEY=<ACCESS_KEY> cargo test --lib live_private_relay -- --ignored
+    #[test]
+    #[ignore = "needs a running private relay: PANDACODE_RELAY_URL, PANDACODE_RELAY_CA and PANDACODE_RELAY_KEY (relay/self-host)"]
+    fn live_private_relay_signs_in_with_a_key_and_connects_over_its_own_ca() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let build = config::build().expect("set PANDACODE_RELAY_URL to the relay's https:// address");
+        assert!(!auth::uses_github(&build), "unset PANDACODE_GITHUB_CLIENT_ID for a key-only relay");
+        let key = std::env::var(KEY_ENV).expect("set PANDACODE_RELAY_KEY to the relay's ACCESS_KEY");
+        let id = uuid::Uuid::new_v4().to_string();
+        let device = json!({"id": id, "name": "live test", "platform": "linux", "publicKey": crypto::public_key(&crypto::generate())});
+
+        crate::cloud::http::block(async {
+            let wrong = auth::register(&build, &auth::Credential::Key(format!("{key}-wrong")), device.clone()).await.unwrap_err();
+            assert_eq!(wrong, "Relay: wrong access key");
+
+            let (token, account) = auth::register(&build, &auth::Credential::Key(key.clone()), device.clone()).await.unwrap();
+            assert_eq!(account.login, "Private relay");
+            assert_eq!(config::parse_token(&token).unwrap().dev, id);
+            let listed = auth::relay(&build, &token, reqwest::Method::GET, "/v1/devices").await.unwrap();
+            assert!(listed["devices"].as_array().unwrap().iter().any(|d| d["id"] == id.as_str()));
+
+            // The socket the app keeps open, with the config the app builds.
+            let url = format!("wss://{}/v1/connect?host=0", build.relay.trim_start_matches("https://"));
+            let mut request = url.into_client_request().unwrap();
+            request.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+            let connected = tokio::time::timeout(std::time::Duration::from_secs(15), tokio_tungstenite::connect_async_tls_with_config(request.clone(), None, false, Some(socket::tls()))).await;
+            assert!(matches!(connected, Ok(Ok(_))), "the WebSocket must verify the relay's certificate through the extra CA: {:?}", connected.err());
+
+            // Public roots alone must refuse a private authority: the extra trust is only what was named.
+            let public = rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() })
+                .with_no_client_auth();
+            let refused = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(public)))).await;
+            assert!(refused.is_err(), "a relay with a private CA must not verify against the public roots");
+
+            auth::relay(&build, &token, reqwest::Method::DELETE, &format!("/v1/devices/{id}")).await.unwrap();
+        });
     }
 
     pub(super) fn device(id: &str, name: &str, key: &str) -> Device {

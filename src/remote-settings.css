@@ -16,6 +16,7 @@
 .remote-device-actions{display:flex;align-items:center;gap:8px;flex:none}
 .remote-device-actions select{width:auto;max-width:150px;height:32px;padding:0 10px;border:0;border-radius:var(--ds-radius-control);background:var(--ds-fill);font-size:var(--ds-text-ui)}
 .remote-device-actions .primary-button,.remote-device-actions .secondary-button{padding:0 12px;min-height:32px}
+.setting-row .remote-device-actions input.remote-access-key{width:220px;height:32px;padding:0 10px;border:0;border-radius:var(--ds-radius-control);background:var(--ds-card-inset);font-size:var(--ds-text-ui)}
 .setting-row .remote-device-actions input.remote-pair-input{width:84px;height:32px;padding:0 10px;border:0;border-radius:var(--ds-radius-control);background:var(--ds-card-inset);font:var(--ds-text-ui) var(--mono);letter-spacing:.08em;text-align:center}
 .remote-pending{background:var(--ds-card-inset)}
 .remote-key{font:var(--ds-text-chip) var(--mono);color:var(--text)}

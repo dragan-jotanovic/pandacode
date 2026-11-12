@@ -21,6 +21,21 @@ devices. It stores no task content. The contract is in [docs/remote-access.md](.
    The deploy creates the `Account` Durable Object (SQLite migration `v1`) and the `AUTH_LIMITER` (10/min per IP) `ACCOUNT_LIMITER` (30/min per account) and `GLOBAL_AUTH_LIMITER` (300/min across all sign-ins, checked after the per-IP one) rate-limit bindings.
 3. Build the desktop app with `PANDACODE_RELAY_URL` set to the Worker URL (or set it as an environment variable at run time).
 
+## Private network: no GitHub, your own certificate
+
+`self-host/` runs the relay in Docker (Caddy for TLS in front of `wrangler dev`), with no Cloudflare account and no GitHub:
+
+```sh
+cd self-host
+./make-certs.sh relay.home.lan 192.168.1.10   # a private CA and a server certificate; certs/ca.pem goes to each computer
+cp .env.example .env                           # SESSION_SECRET, ACCESS_KEY, RELAY_HOST (one of the names above)
+docker compose up -d --build
+```
+
+Sign-in is the shared `ACCESS_KEY` (at least 32 characters, `openssl rand -base64 32`): everyone who has it is one account. Leave the `GITHUB_CLIENT_*` pair empty and the relay never contacts GitHub (or anything else; the only outbound attempt is wrangler's optional Cloudflare lookup at start, which falls back). The `/v1/auth/key` route only works when `ACCESS_KEY` is set; the GitHub route only when its pair is.
+
+On each PandaCode computer, build or launch with `PANDACODE_RELAY_URL=https://relay.home.lan` and **no** `PANDACODE_GITHUB_CLIENT_ID`, and `PANDACODE_RELAY_CA=/path/to/ca.pem` (or drop the file in the app data folder as `relay-ca.pem`). Settings → Remote access then asks for the access key. A headless server: `PANDACODE_RELAY_KEY=… pandacode serve --sign-in`. Details: [docs/remote-access.md](../docs/remote-access.md#private-relay-no-github-own-certificate-authority). The mobile app still needs a GitHub client ID and a certificate its phone trusts.
+
 Rotating `SESSION_SECRET` signs everyone out. `SESSION_SECRET` must be at least 32 characters; with it missing or shorter (or the GitHub ID/secret missing, for sign-in) every request gets a generic `500 server error`.
 
 Hardening notes:

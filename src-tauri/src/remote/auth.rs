@@ -1,5 +1,5 @@
 //! GitHub device-flow sign-in and the relay's HTTP API.
-use super::config::{Account, Build};
+use super::config::{self, Account, Build};
 use crate::{cloud::http, Result};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -31,8 +31,36 @@ async fn github_form(path: &str, body: String) -> Result<Value> {
     http::send("GitHub", request).await
 }
 
+/// What proves who is signing in: a GitHub token from the device flow, or the relay's access key.
+/// Neither is ever printed: no `Debug`.
+pub(crate) enum Credential {
+    Github(String),
+    Key(String),
+}
+
+/// Whether this build signs in with GitHub (it has an OAuth app) or with the relay's access key.
+pub(crate) fn uses_github(build: &Build) -> bool {
+    build.client_id.is_some()
+}
+
+/// The key as typed: no surrounding whitespace, and a size the relay accepts.
+pub(crate) fn clean_key(key: &str) -> Result<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("Enter the relay's access key.".into());
+    }
+    if key.len() > 512 || key.chars().any(char::is_control) {
+        return Err("That is not a valid access key.".into());
+    }
+    Ok(key.to_owned())
+}
+
+fn client_id(build: &Build) -> Result<&str> {
+    build.client_id.as_deref().ok_or_else(|| "This relay signs in with an access key, not GitHub.".into())
+}
+
 pub(crate) async fn start(build: &Build) -> Result<(Flow, Value)> {
-    let reply = github_form("/login/device/code", format!("client_id={}&scope=", build.client_id)).await?;
+    let reply = github_form("/login/device/code", format!("client_id={}&scope=", client_id(build)?)).await?;
     let text = |key: &str| reply[key].as_str().map(str::to_owned).ok_or_else(|| format!("GitHub did not start sign-in: {}", reply["error_description"].as_str().unwrap_or("unexpected reply")));
     let (device_code, user_code, verification_uri) = (text("device_code")?, text("user_code")?, text("verification_uri")?);
     if !safe(&device_code) || !verification_uri.starts_with("https://github.com/") {
@@ -45,6 +73,7 @@ pub(crate) async fn start(build: &Build) -> Result<(Flow, Value)> {
 
 /// Waits for the user to approve and returns the GitHub token (kept only in memory).
 pub(crate) async fn github_token(build: &Build, mut flow: Flow) -> Result<String> {
+    let client_id = client_id(build)?.to_owned();
     let github_token = loop {
         if Instant::now() >= flow.expires {
             return Err("The sign-in code expired. Start again.".into());
@@ -52,7 +81,7 @@ pub(crate) async fn github_token(build: &Build, mut flow: Flow) -> Result<String
         tokio::time::sleep(Duration::from_secs(flow.interval)).await;
         let reply = github_form(
             "/login/oauth/access_token",
-            format!("client_id={}&device_code={}&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code", build.client_id, flow.device_code),
+            format!("client_id={client_id}&device_code={}&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code", flow.device_code),
         )
         .await?;
         if let Some(token) = reply["access_token"].as_str() {
@@ -69,9 +98,13 @@ pub(crate) async fn github_token(build: &Build, mut flow: Flow) -> Result<String
     Ok(github_token)
 }
 
-/// Trades the GitHub token for a relay token. A 409 comes back as [`KEY_CHANGED`].
-pub(crate) async fn register(build: &Build, github_token: &str, device: Value) -> Result<(String, Account)> {
-    let reply = request(build, None, reqwest::Method::POST, "/v1/auth/github", Some(json!({"githubToken": github_token, "device": device}))).await?;
+/// Trades the credential for a relay token. A 409 comes back as [`KEY_CHANGED`].
+pub(crate) async fn register(build: &Build, credential: &Credential, device: Value) -> Result<(String, Account)> {
+    let (path, body) = match credential {
+        Credential::Github(token) => ("/v1/auth/github", json!({"githubToken": token, "device": device})),
+        Credential::Key(key) => ("/v1/auth/key", json!({"key": key, "device": device})),
+    };
+    let reply = request(build, None, reqwest::Method::POST, path, Some(body)).await?;
     let token = reply["token"].as_str().filter(|token| token.len() <= 4096).ok_or("The relay did not return a token.")?.to_owned();
     let account = serde_json::from_value::<Account>(reply["account"].clone()).map_err(|_| "The relay returned an unreadable account.")?;
     Ok((token, account))
@@ -82,15 +115,35 @@ pub(crate) async fn relay(build: &Build, token: &str, method: reqwest::Method, p
     request(build, Some(token), method, path, None).await
 }
 
+/// Why a relay request never got an answer. A certificate the app does not trust is the usual
+/// reason for a private relay, and worth saying: nothing else in the message would hint at it.
+fn unreachable(error: reqwest::Error) -> String {
+    use std::error::Error;
+    if error.is_timeout() {
+        return "The relay did not answer in time.".into();
+    }
+    let mut chain = String::new();
+    let mut source: Option<&dyn Error> = Some(&error);
+    while let Some(error) = source {
+        chain.push_str(&error.to_string().to_ascii_lowercase());
+        chain.push(' ');
+        source = error.source();
+    }
+    if chain.contains("certificate") || chain.contains("unknownissuer") {
+        return format!("The relay's certificate is not trusted. For a private relay, point {} at its certificate authority (a PEM file).", config::CA_ENV);
+    }
+    "Could not reach the relay. Check your connection.".into()
+}
+
 async fn request(build: &Build, token: Option<&str>, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
-    let mut request = http::client(Duration::from_secs(20))?.request(method, format!("{}{path}", build.relay));
+    let mut request = http::client_trusting(Duration::from_secs(20), &config::relay_ca()?)?.request(method, format!("{}{path}", build.relay));
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
     if let Some(body) = body {
         request = request.header("Content-Type", "application/json").body(body.to_string());
     }
-    let response = request.send().await.map_err(|e| if e.is_timeout() { "The relay did not answer in time.".to_string() } else { "Could not reach the relay. Check your connection.".to_string() })?;
+    let response = request.send().await.map_err(unreachable)?;
     let status = response.status().as_u16();
     let bytes = response.bytes().await.map_err(|_| "The relay's response was cut off.")?;
     if bytes.len() > LIMIT {

@@ -6,6 +6,8 @@ export interface Env {
   SESSION_SECRET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  /** Shared key for sign-in without GitHub (relay/src/access-key.ts); at least 32 characters. */
+  ACCESS_KEY?: string;
   /** Push bridge (relay/src/push.ts): every field optional. A relay without them stores
    * registrations and answers notify frames, but sends nothing. */
   APNS_KEY?: string;

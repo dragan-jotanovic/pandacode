@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { KEY_ACCOUNT, keyMatches } from "../src/access-key.ts";
 import { readJsonCapped } from "../src/body.ts";
 import { configured } from "../src/config.ts";
 import { fullBucket, take } from "../src/bucket.ts";
@@ -177,11 +178,33 @@ test("capped body reader stops at the cap, chunked or not", async () => {
 
 test("secret config check", () => {
   const ok = { SESSION_SECRET: "s".repeat(32), GITHUB_CLIENT_ID: "id", GITHUB_CLIENT_SECRET: "sec" };
-  assert.equal(configured(ok, true), true);
+  assert.equal(configured(ok, "github"), true);
   assert.equal(configured({ ...ok, SESSION_SECRET: "s".repeat(31) }, false), false);
   assert.equal(configured({ ...ok, SESSION_SECRET: undefined }, false), false);
   assert.equal(configured({ SESSION_SECRET: ok.SESSION_SECRET }, false), true);
-  assert.equal(configured({ SESSION_SECRET: ok.SESSION_SECRET }, true), false);
+  assert.equal(configured({ SESSION_SECRET: ok.SESSION_SECRET }, "github"), false);
+});
+
+test("key sign-in needs only ACCESS_KEY, and GitHub sign-in does not need it", () => {
+  const session = "s".repeat(32);
+  assert.equal(configured({ SESSION_SECRET: session, ACCESS_KEY: "k".repeat(32) }, "key"), true, "no GitHub settings at all");
+  assert.equal(configured({ SESSION_SECRET: session, ACCESS_KEY: "k".repeat(31) }, "key"), false, "a short key is refused");
+  assert.equal(configured({ SESSION_SECRET: session }, "key"), false);
+  assert.equal(configured({ SESSION_SECRET: "s".repeat(31), ACCESS_KEY: "k".repeat(32) }, "key"), false);
+  assert.equal(configured({ SESSION_SECRET: session, GITHUB_CLIENT_ID: "id", GITHUB_CLIENT_SECRET: "sec" }, "key"), false);
+  assert.equal(configured({ SESSION_SECRET: session, ACCESS_KEY: "k".repeat(32) }, "github"), false);
+  assert.equal(configured({ SESSION_SECRET: session, ACCESS_KEY: "k".repeat(32) }, false), true, "other routes need only the session secret");
+});
+
+test("the access key matches exactly, whatever its length", async () => {
+  const key = "k".repeat(40);
+  assert.equal(await keyMatches(key, key), true);
+  assert.equal(await keyMatches(`${key}x`, key), false);
+  assert.equal(await keyMatches(key.slice(1), key), false);
+  assert.equal(await keyMatches("", key), false);
+  assert.equal(await keyMatches(key, ""), false);
+  assert.equal(await keyMatches("é".repeat(20), "é".repeat(20)), true);
+  assert.equal(KEY_ACCOUNT.id.startsWith("key:"), true, "never collides with a gh: account");
 });
 
 test("gen claim: round trip, mismatch refused, legacy tokens use iat", async () => {

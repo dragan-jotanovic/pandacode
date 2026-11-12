@@ -149,8 +149,9 @@ embedded editor engine.
 ### Run it anywhere
 
 - **PandaCode Connect.** Sign in with GitHub to start and control tasks on your other
-  computers over an end-to-end encrypted relay. Off until you sign in. See
-  [remote access](docs/remote-access.md).
+  computers over an end-to-end encrypted relay. Off until you sign in. The relay can run
+  on your own network with no GitHub and your own certificate authority
+  ([`relay/self-host`](relay/self-host/compose.yaml)). See [remote access](docs/remote-access.md).
 - **Mobile app.** Watch, steer and approve tasks from an iPhone or Android phone; tasks
   never run on the phone. Join the iPhone beta on
   [TestFlight](https://testflight.apple.com/join/TpY9PjJe), or build it from [`mobile/`](mobile/README.md).

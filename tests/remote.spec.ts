@@ -10,6 +10,38 @@ async function openRemoteSettings(page: Page) {
   return page.getByRole('tabpanel', { name: 'Remote access' });
 }
 
+test('a private relay signs in with its access key, with no GitHub', async ({ page }) => {
+  await page.addInitScript(() => { (window as any).__remoteSignIn = 'key'; });
+  const panel = await openRemoteSettings(page);
+  await expect(panel.getByRole('button', { name: 'Sign in with GitHub' })).toHaveCount(0);
+  const key = panel.getByLabel('Relay access key');
+  await expect(key).toHaveAttribute('type', 'password');
+  await expect(panel.getByText('Private relay')).toBeVisible();
+
+  // Nothing typed: no request, a clear message.
+  await panel.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(panel.getByRole('alert')).toContainText('Enter the relay’s access key.');
+  expect(await page.evaluate(() => (window as any).__remoteKeys ?? [])).toEqual([]);
+
+  // A wrong key is the relay's own message, and the typed key stays for a fix.
+  await key.fill('wrong-key');
+  await key.press('Enter');
+  await expect(panel.getByRole('alert')).toContainText('wrong access key');
+  await expect(key).toHaveValue('wrong-key');
+  await expect(panel.getByRole('button', { name: 'Sign in', exact: true })).toBeEnabled();
+
+  await key.fill('  the-real-access-key  ');
+  await panel.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await expect(panel.getByText('Signed in with the access key')).toBeVisible();
+  await expect(panel.getByText('Private relay').first()).toBeVisible();
+  await expect(panel.getByLabel('Relay access key')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__remoteKeys)).toEqual(['wrong-key', 'the-real-access-key']);
+
+  await panel.getByRole('button', { name: 'Sign out' }).click();
+  await expect(panel.getByLabel('Relay access key')).toHaveValue('');
+});
+
 test('signs in with a device code, toggles remote control and lists devices', async ({ page }) => {
   const panel = await openRemoteSettings(page);
   await panel.getByRole('button', { name: 'Sign in with GitHub' }).click();

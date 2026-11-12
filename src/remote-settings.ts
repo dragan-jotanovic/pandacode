@@ -2,7 +2,7 @@
  * manage the account's devices and what each may do (scoped pairing, remote/grants.rs).
  * Nothing reaches the network until the user signs in. */
 import './remote-settings.css';
-import { escape, icon } from './dom';
+import { escape, icon, isImeKey } from './dom';
 import { errorText } from './error-text';
 import { infoMark } from './tooltip';
 import { mountOrchestrationSettings } from './machine-orchestration';
@@ -12,6 +12,7 @@ import type { RemoteDevice, RemoteHost, RemoteSignIn, RemoteStatus } from './rem
 const FULL_TIP = 'When off, your other computers cannot start or switch a task here to Full access (no approvals); a remote task without a mode starts in Ask.';
 const ALLOW_TIP = 'Your other signed-in computers can see and drive tasks here. Remote prompts follow this computer’s approval settings; they get no more power than prompts typed here.';
 const NOTIFY_TIP = 'Pushes a generic notice when a hosted task needs approval or finishes. The relay sends the phone a push that says only how many tasks need attention; approving still happens in the app over the end-to-end encrypted channel.';
+const ACCESS_KEY_TIP = 'This relay runs on your own network and signs in with its access key, not GitHub. Anyone with the key can add computers to the account, so keep it private. Task content is end-to-end encrypted; the relay sees only ciphertext.';
 const KEY_TIP = 'Another computer shows this key when it asks you to approve this one. Approve only if the keys match.';
 const CODE_TIP = 'A one-time code skips the approval prompt for one new device. It works once, for 10 minutes, and gives the access you pick. Enter it on the other computer under Pair with a code.';
 const PAIR_TIP = 'Enter the 6-digit code that the other computer shows under Pairing code. It gives this computer the access that computer chose.';
@@ -25,10 +26,12 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
   let status: RemoteStatus | undefined, devices: RemoteDevice[] = [], grants: DeviceGrant[] = [], error = '', statusError = '', devicesError = '', grantsError = '', errorTarget = '', devicesLoaded = false, loading = true, code: RemoteSignIn | undefined, expires = 0, signingIn = false, disposed = false, attempt = 0;
   let pairCode: PairCode | undefined, codeScope: GrantScope = 'control', pairTarget = '', pairInput = '', pairing = false, expiry: number | undefined;
   const picks: Record<string, string> = {};
+  let keyDraft = '';
   const message = (e: unknown) => errorText(e);
   /** The control whose action failed (a selector): the banner is drawn under its row and Dismiss returns focus to it. */
   const fail = (e: unknown, target = '') => { error = message(e); errorTarget = target; render(); };
   const attr = (name: string, value: string) => `[${name}="${value.replace(/["\\]/g, '\\$&')}"]`;
+
   const failure = (title: string, detail: string) => `<div class="remote-load-error" role="alert">${icon('alert')}<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span><button type="button" class="secondary-button" data-retry>Retry</button></div>`;
   const grantOf = (id: string) => grants.find(grant => grant.deviceId === id);
 
@@ -67,11 +70,14 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     }
     if (!status) return failure('Couldn’t load remote access.', 'Try again.');
     if (!status.configured) return '<p class="remote-note" role="status">Remote access is not configured in this build.</p>';
+    if (!status.signedIn && status.signIn === 'key') {
+      return `<div class="setting-row"><div><strong>PandaCode Connect ${infoMark(ACCESS_KEY_TIP, 'About PandaCode Connect')}<span class="sr-only">${ACCESS_KEY_TIP}</span></strong><small>Private relay</small></div><span class="remote-device-actions"><input type="password" id="remote-access-key" class="remote-access-key" autocomplete="off" spellcheck="false" placeholder="Access key" aria-label="Relay access key" value="${escape(keyDraft)}" ${signingIn ? 'disabled' : ''}><button type="button" class="secondary-button" data-sign-in-key ${signingIn ? 'disabled' : ''}>Sign in</button></span></div>`;
+    }
     if (!status.signedIn) {
       const flow = code ? `<div class="remote-code"><p>Enter this code at <strong>${escape(code.verificationUri)}</strong>:</p><div class="remote-code-row"><output class="remote-user-code" aria-label="Device code">${escape(code.userCode)}</output><button type="button" class="secondary-button" data-copy>${icon('copy')}Copy code</button></div><p class="remote-note" role="status">Waiting for you to approve in the browser… The code expires at ${new Date(expires).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p><button type="button" class="secondary-button" data-cancel>Cancel</button></div>` : '';
       return `<div class="setting-row"><div><strong>PandaCode Connect ${infoMark('Sign in with GitHub to reach your other computers. Task content is end-to-end encrypted; the relay sees only ciphertext.', 'About PandaCode Connect')}<span class="sr-only">Sign in with GitHub to reach your other computers. Task content is end-to-end encrypted; the relay sees only ciphertext.</span></strong></div><button type="button" class="secondary-button" data-sign-in ${signingIn ? 'disabled' : ''}>${icon('github')}Sign in with GitHub</button></div>${flow}`;
     }
-    return `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>Signed in with GitHub · <span class="${status.connected ? 'ds-success' : 'ds-warn'}">${status.connected ? 'connected' : 'connecting…'}</span></small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
+    return `<div class="setting-row"><div><strong>${escape(status.account?.login ?? 'Signed in')}</strong><small>${status.signIn === 'key' ? 'Signed in with the access key' : 'Signed in with GitHub'} · <span class="${status.connected ? 'ds-success' : 'ds-warn'}">${status.connected ? 'connected' : 'connecting…'}</span></small></div><button type="button" class="secondary-button" data-sign-out>Sign out</button></div>
       <div class="setting-row"><div><strong>Allow remote control of this computer <span class="sr-only">${ALLOW_TIP}</span></strong></div><input type="checkbox" class="settings-switch" id="remote-host" aria-label="Allow remote control of this computer" ${status.hostEnabled ? 'checked' : ''}>${infoMark(ALLOW_TIP, 'About remote control')}</div>
       <div class="setting-row"><div><strong>Notify my phone <span class="sr-only">${NOTIFY_TIP}</span></strong></div><input type="checkbox" class="settings-switch" id="remote-notify" aria-label="Notify my phone" ${status.notifyEnabled ? 'checked' : ''}>${infoMark(NOTIFY_TIP, 'About phone notifications')}</div>
       <div class="setting-row"><div><strong>Full access for remote tasks <span class="sr-only">${FULL_TIP}</span></strong></div><input type="checkbox" class="settings-switch" id="remote-full-access" aria-label="Full access for remote tasks" ${status.remoteFullAccess ? 'checked' : ''}>${infoMark(FULL_TIP, 'About full access for remote tasks')}</div>
@@ -130,6 +136,15 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     }
     render();
   }
+  async function signInWithKey(): Promise<void> {
+    if (signingIn) return;
+    const key = keyDraft.trim();
+    if (!key) { error = 'Enter the relay’s access key.'; render(); return; }
+    error = ''; devicesError = ''; signingIn = true; render();
+    try { apply(await host.call<RemoteStatus>('remote_sign_in_key', { key })); keyDraft = ''; await loadDevices(); }
+    catch (e) { signingIn = false; error = message(e); }
+    render();
+  }
   function cancelSignIn(): void {
     attempt++; code = undefined; signingIn = false; error = ''; render();
     void host.call('remote_sign_in_cancel').catch(e => fail(e, '[data-sign-in]'));
@@ -153,6 +168,7 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
     }
     else if (target.hasAttribute('data-retry')) void load();
     else if (target.hasAttribute('data-sign-in')) void signIn();
+    else if (target.hasAttribute('data-sign-in-key')) void signInWithKey();
     else if (target.hasAttribute('data-cancel')) cancelSignIn();
     else if (target.hasAttribute('data-copy') && code) void navigator.clipboard.writeText(code.userCode).then(() => host.notify('Code copied'), () => (host.notifyError ?? host.notify)('Couldn’t copy; select the code instead'));
     else if (target.hasAttribute('data-sign-out')) void host.call<RemoteStatus>('remote_sign_out').then(next => { apply(next); devices = []; devicesLoaded = true; devicesError = ''; error = ''; render(); }, e => fail(e, '[data-sign-out]'));
@@ -169,9 +185,13 @@ export function mountRemoteSettings(root: HTMLElement, host: RemoteHost): () => 
   });
   root.addEventListener('input', event => {
     const input = event.target as HTMLInputElement;
+    if (input.id === 'remote-access-key') { keyDraft = input.value; return; }
     if (input.id !== 'remote-pair-input') return;
     const digits = input.value.replace(/\D/g, '').slice(0, 6);
     pairInput = digits; input.value = groupCode(digits);
+  });
+  root.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !isImeKey(event) && (event.target as HTMLElement).id === 'remote-access-key') { event.preventDefault(); void signInWithKey(); }
   });
   root.addEventListener('change', event => {
     const input = event.target as HTMLInputElement | HTMLSelectElement;

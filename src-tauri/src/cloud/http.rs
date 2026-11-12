@@ -8,18 +8,25 @@ const LIMIT: usize = 16 * 1024 * 1024;
 const TOKEN_LIKE: usize = 20;
 
 pub fn client(timeout: Duration) -> Result<reqwest::Client, String> {
+    client_trusting(timeout, &[])
+}
+
+/// A client that also trusts the given DER certificate authorities, for a service on a private network.
+pub fn client_trusting(timeout: Duration, authorities: &[Vec<u8>]) -> Result<reqwest::Client, String> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         // Tests talk to a loopback server; everything else must be HTTPS.
         .https_only(!cfg!(test))
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent(concat!("PandaCode/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("Could not prepare a network client: {e}"))
+        .user_agent(concat!("PandaCode/", env!("CARGO_PKG_VERSION")));
+    for der in authorities {
+        builder = builder.add_root_certificate(reqwest::Certificate::from_der(der).map_err(|_| "The relay certificate is not a valid X.509 certificate.".to_string())?);
+    }
+    builder.build().map_err(|e| format!("Could not prepare a network client: {e}"))
 }
 
 /// The service's own message from an error body, else the status.

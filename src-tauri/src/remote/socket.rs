@@ -269,13 +269,31 @@ async fn session(app: &tauri::AppHandle, generation: u64, token: &str) -> Outcom
 /// CPU, not a round trip (TLS 1.3 takes one either way). 0-RTT early data is not used: a
 /// replayed upgrade would replace this device's socket at the relay (close 4000, a minute's
 /// backoff), and the relay can't tell a replay apart.
+///
+/// The roots are the public ones plus the authority a private relay names (`config::relay_ca`).
+/// The config is rebuilt when that file changes, so a new certificate needs no restart; an
+/// unusable file is recorded and leaves the public roots, which then refuse the relay.
 pub(super) fn tls() -> tokio_tungstenite::Connector {
-    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
-    let config = CONFIG.get_or_init(|| {
-        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth())
+    /// The extra authorities (DER) a config was built with, and that config.
+    type Built = Option<(Vec<Vec<u8>>, std::sync::Arc<rustls::ClientConfig>)>;
+    static CONFIG: std::sync::Mutex<Built> = std::sync::Mutex::new(None);
+    let extra = config::relay_ca().unwrap_or_else(|error| {
+        super::diagnostics::record("socket.error", &error);
+        Vec::new()
     });
-    tokio_tungstenite::Connector::Rustls(config.clone())
+    let mut cached = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, config)) = cached.as_ref().filter(|(authorities, _)| *authorities == extra) {
+        return tokio_tungstenite::Connector::Rustls(config.clone());
+    }
+    let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    for der in &extra {
+        if roots.add(rustls::pki_types::CertificateDer::from(der.clone())).is_err() {
+            super::diagnostics::record("socket.error", "The relay certificate is not a valid X.509 certificate");
+        }
+    }
+    let config = std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+    *cached = Some((extra, config.clone()));
+    tokio_tungstenite::Connector::Rustls(config)
 }
 
 /// Trades a token in its last week for a fresh 30-day one (`POST /v1/token`). Failures are
