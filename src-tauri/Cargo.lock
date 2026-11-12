@@ -3666,6 +3666,7 @@ dependencies = [
  "rubato",
  "rusqlite",
  "rustls",
+ "rustls-platform-verifier",
  "security-framework",
  "serde",
  "serde_json",

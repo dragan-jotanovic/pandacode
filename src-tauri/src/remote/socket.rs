@@ -186,7 +186,14 @@ async fn session(app: &tauri::AppHandle, generation: u64, token: &str) -> Outcom
     let stream = match tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async_tls_with_config(request, Some(limits), false, Some(tls()))).await {
         Ok(Ok((stream, _))) => stream,
         Ok(Err(tungstenite::Error::Http(response))) if matches!(response.status().as_u16(), 401 | 403) => return Outcome::Unauthorized,
-        _ => return Outcome::Failed,
+        Ok(Err(error)) => {
+            super::diagnostics::record("socket.cause", error.to_string());
+            return Outcome::Failed;
+        }
+        Err(_) => {
+            super::diagnostics::record("socket.cause", "No answer from the relay within 15 s");
+            return Outcome::Failed;
+        }
     };
     let opened = Instant::now();
     let (mut write, mut read) = stream.split();
@@ -270,7 +277,8 @@ async fn session(app: &tauri::AppHandle, generation: u64, token: &str) -> Outcom
 /// replayed upgrade would replace this device's socket at the relay (close 4000, a minute's
 /// backoff), and the relay can't tell a replay apart.
 ///
-/// The roots are the public ones plus the authority a private relay names (`config::relay_ca`).
+/// The roots are the system's (the same store the HTTPS client uses, so a corporate root installed
+/// there is trusted by both) plus the authority a private relay names (`config::relay_ca`).
 /// The config is rebuilt when that file changes, so a new certificate needs no restart; an
 /// unusable file is recorded and leaves the public roots, which then refuse the relay.
 pub(super) fn tls() -> tokio_tungstenite::Connector {
@@ -285,13 +293,21 @@ pub(super) fn tls() -> tokio_tungstenite::Connector {
     if let Some((_, config)) = cached.as_ref().filter(|(authorities, _)| *authorities == extra) {
         return tokio_tungstenite::Connector::Rustls(config.clone());
     }
-    let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-    for der in &extra {
-        if roots.add(rustls::pki_types::CertificateDer::from(der.clone())).is_err() {
-            super::diagnostics::record("socket.error", "The relay certificate is not a valid X.509 certificate");
+    let authorities = extra.iter().map(|der| rustls::pki_types::CertificateDer::from(der.clone()));
+    let provider = rustls::crypto::CryptoProvider::get_default().cloned().unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::ring::default_provider()));
+    let builder = rustls::ClientConfig::builder();
+    let config = match rustls_platform_verifier::Verifier::new_with_extra_roots(authorities.clone(), provider) {
+        Ok(verifier) => builder.dangerous().with_custom_certificate_verifier(std::sync::Arc::new(verifier)).with_no_client_auth(),
+        Err(error) => {
+            super::diagnostics::record("socket.error", format!("The system certificate store is unusable ({error}); only the public roots are trusted"));
+            let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            for der in authorities {
+                let _ = roots.add(der);
+            }
+            builder.with_root_certificates(roots).with_no_client_auth()
         }
-    }
-    let config = std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+    };
+    let config = std::sync::Arc::new(config);
     *cached = Some((extra, config.clone()));
     tokio_tungstenite::Connector::Rustls(config)
 }

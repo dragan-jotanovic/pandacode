@@ -5,6 +5,7 @@
 # CA, PANDACODE_RELAY_CA=<ca.pem>). With only ACCESS_KEY set, nothing here needs internet access.
 services:
   relay:
+    image: pandacode-relay:local
     build:
       context: ..
       dockerfile: self-host/Dockerfile

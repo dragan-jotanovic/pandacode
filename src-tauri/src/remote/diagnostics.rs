@@ -2,7 +2,7 @@
 //! stats (state, RTT, last error), shown in Settings and exportable without secrets.
 //!
 //! Event kinds the relay summary understands: `socket.connecting` (first attempt),
-//! `socket.retry`/`socket.reconnect` (count as a reconnect), `socket.open` (connected), `socket.close`/`socket.error` (last error).
+//! `socket.retry`/`socket.reconnect` (count as a reconnect), `socket.open` (connected), `socket.close`/`socket.error` (last error); `socket.cause` is the scrubbed reason a connect failed, logged before its `socket.error`.
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
